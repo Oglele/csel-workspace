@@ -6,7 +6,7 @@ all: build/build.ninja
 
 # Create build directory and generate build files if needed
 build/build.ninja : CMakeLists.txt
-	cmake -S . -B build -G "Ninja"
+	cmake -S . -B build -G "Ninja" 
 
 # Clean build directory
 clean:

@@ -30,6 +30,10 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <sys/timerfd.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 /*
  * status led - gpioa.10 --> gpio10
@@ -38,7 +42,15 @@
 #define GPIO_EXPORT "/sys/class/gpio/export"
 #define GPIO_UNEXPORT "/sys/class/gpio/unexport"
 #define GPIO_LED "/sys/class/gpio/gpio10"
+
+#define GPIO_BTN_A0 "/sys/class/gpio/gpio0"
+#define GPIO_BTN_A2 "/sys/class/gpio/gpio2"
+#define GPIO_BTN_A3 "/sys/class/gpio/gpio3"
+
 #define LED "10"
+#define BTN_A0 "0"
+#define BTN_A2 "2"
+#define BTN_A3 "3"
 
 static int open_led()
 {
@@ -63,11 +75,47 @@ static int open_led()
     return f;
 }
 
+static int open_bnt(char* num_port)
+{
+    char path[64];
+    // unexport pin out of sysfs (reinitialization)
+    int f = open(GPIO_UNEXPORT, O_WRONLY);
+
+    write(f, num_port, strlen(num_port));
+    close(f);
+
+    // export pin to sysfs
+    f = open(GPIO_EXPORT, O_WRONLY);
+    write(f, num_port, strlen(num_port));
+    close(f);
+
+    // config pin
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%s/direction", num_port);
+    f = open(path, O_WRONLY);
+    write(f, "in", 2);
+    close(f);
+
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%s/edge", num_port);
+    f = open(path, O_WRONLY);
+    write(f, "rising", 6);
+    close(f);
+
+    // open gpio value attribute
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%s/value", num_port);
+    f = open(path, O_RDWR);
+    return f;
+}
+
 int main(int argc, char* argv[])
 {
-    long duty   = 2;     // %
+    struct itimerspec  new_value;
+    uint64_t exp;
+    int timer_fd;
+    ssize_t s;
+    bool led_v = 0;
+
+    long duty   = 50;     // %
     long period = 1000;  // ms
-    if (argc >= 2) period = atoi(argv[1]);
     period *= 1000000;  // in ns
 
     // compute duty period...
@@ -75,29 +123,48 @@ int main(int argc, char* argv[])
     long p2 = period - p1;
 
     int led = open_led();
-    pwrite(led, "1", sizeof("1"), 0);
 
-    struct timespec t1;
-    clock_gettime(CLOCK_MONOTONIC, &t1);
+    new_value.it_interval.tv_sec = 0;
+    new_value.it_interval.tv_nsec = 0;
+    
+    new_value.it_value.tv_sec = 0;
+    new_value.it_value.tv_nsec = p1;
+
+    timer_fd = timerfd_create(CLOCK_MONOTONIC,0);
+    if (timer_fd == -1)
+        err(EXIT_FAILURE, "timerfd_create");
+
+    if (timerfd_settime(timer_fd, 0, &new_value, NULL) == -1)
+               err(EXIT_FAILURE, "timerfd_settime");
+
+    int btnA0 = open_bnt(BTN_A0);
+    int btnA2 = open_bnt(BTN_A2);
+    int btnA3 = open_bnt(BTN_A3);
+
 
     int k = 0;
     while (1) {
-        struct timespec t2;
-        clock_gettime(CLOCK_MONOTONIC, &t2);
 
-        long delta =
-            (t2.tv_sec - t1.tv_sec) * 1000000000 + (t2.tv_nsec - t1.tv_nsec);
+        // long delta =
+        //     (t2.tv_sec - t1.tv_sec) * 1000000000 + (t2.tv_nsec - t1.tv_nsec);
 
-        int toggle = ((k == 0) && (delta >= p1)) | ((k == 1) && (delta >= p2));
-        if (toggle) {
-            t1 = t2;
-            k  = (k + 1) % 2;
-            if (k == 0)
+        s = read(timer_fd, &exp, sizeof(uint64_t));
+        if (s != sizeof(uint64_t))
+                   err(EXIT_FAILURE, "read");
+
+        led_v = !led_v;
+            if (led_v == 1)
                 pwrite(led, "1", sizeof("1"), 0);
             else
                 pwrite(led, "0", sizeof("0"), 0);
+
+        long next_duration = led_v ? p2 : p1;
+        new_value.it_value.tv_nsec = next_duration;
+
+        timerfd_settime(timer_fd, 0, &new_value, NULL);
+        if (timerfd_settime(timer_fd, 0, &new_value, NULL) == -1)
+            err(EXIT_FAILURE, "timerfd_settime (loop)");
         }
-    }
 
     return 0;
 }
