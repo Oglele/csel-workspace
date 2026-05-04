@@ -1,6 +1,7 @@
 /* skeleton.c */
-#include <linux/delay.h>       /* needed for delay fonctions */
-#include <linux/device.h>      /* needed for sysfs handling */
+#include <linux/delay.h>  /* needed for delay fonctions */
+#include <linux/device.h> /* needed for sysfs handling */
+#include <linux/gpio.h>
 #include <linux/init.h>        /* needed for macros */
 #include <linux/io.h>          /* needed for mmio handling */
 #include <linux/ioport.h>      /* needed for memory region handling */
@@ -14,6 +15,8 @@
 #include <linux/thermal.h>
 
 #define CLASS
+
+#define GPIO_LED_FREQ 10
 
 struct module_config {
     char mode[30];
@@ -29,43 +32,28 @@ static int temp;
 static int frequency;
 
 ssize_t temp_show(struct device* dev, struct device_attribute* attr,
-                       char* buf) {
+                  char* buf) {
     sprintf(buf, "%d\n", temp);
     return strlen(buf);
 }
 DEVICE_ATTR_RO(temp);
 
-ssize_t frequency_store(struct device* dev,
-                        struct device_attribute* attr,
-                        const char* buf,
-                        size_t count)
-{
-    sscanf(buf,
-           "%i",
-           &frequency);
+ssize_t frequency_store(struct device* dev, struct device_attribute* attr,
+                        const char* buf, size_t count) {
+    sscanf(buf, "%i", &frequency);
     return count;
 }
 // DEVICE_ATTR(frequency, 222, 0, frequency_store);
 DEVICE_ATTR_WO(frequency);
 
-
-ssize_t config_show(struct device* dev,
-                       struct device_attribute* attr,
-                       char* buf)
-{
-    sprintf(buf,
-            "%s\n",
-            config.mode);
+ssize_t config_show(struct device* dev, struct device_attribute* attr,
+                    char* buf) {
+    sprintf(buf, "%s\n", config.mode);
     return strlen(buf);
 }
-ssize_t config_store(struct device* dev,
-                        struct device_attribute* attr,
-                        const char* buf,
-                        size_t count)
-{
-    sscanf(buf,
-           "%s",
-           &config.mode);
+ssize_t config_store(struct device* dev, struct device_attribute* attr,
+                     const char* buf, size_t count) {
+    sscanf(buf, "%s", &config.mode);
     return count;
 }
 DEVICE_ATTR(config, 0664, config_show, config_store);
@@ -76,10 +64,12 @@ static struct device* sysfs_device;
 #endif
 
 int get_temp(void) {
+    static bool led = 0;
     int t = 0;
     int ret = thermal_zone_get_temp(thermal_zone, &t);
     if (ret == 0) {
         pr_info("Température CPU : %d.%d °C\n", t / 1000, t % 1000);
+        gpio_set_value(GPIO_LED_FREQ, led = !led);
     } else {
         pr_info("Error while getting temp...\n");
         return -1;
@@ -96,7 +86,27 @@ static int temp_thread(void* data) {
     return 0;
 }
 
+int init_gpio(void) {
+    int ret = gpio_request(GPIO_LED_FREQ, "gpio_led_freq");
+    if (ret < 0) {
+        pr_err("Failed to get gpio led freq\n");
+        return ret;
+    }
+    ret = gpio_direction_output(GPIO_LED_FREQ, 0);
+    if (ret < 0) {
+        pr_err("Failed to set output gpio led freq\n");
+        gpio_free(GPIO_LED_FREQ);
+        return ret;
+    }
+    return ret;
+}
+
+void deinit_gpio(void){
+    gpio_free(GPIO_LED_FREQ);
+}
+
 static int __init skeleton_init(void) {
+    int ret=0;
     pr_info("Linux module CPU temp loaded\n");
 
     thermal_zone = thermal_zone_get_zone_by_name("cpu-thermal");
@@ -110,12 +120,19 @@ static int __init skeleton_init(void) {
     int status = 0;
 #ifdef CLASS
     sysfs_class = class_create(THIS_MODULE, module_name);
-    sysfs_device =
-        device_create(sysfs_class, NULL, 0, NULL, module_name);
+    sysfs_device = device_create(sysfs_class, NULL, 0, NULL, module_name);
     if (status == 0) status = device_create_file(sysfs_device, &dev_attr_temp);
-    if (status == 0) status = device_create_file(sysfs_device, &dev_attr_config); 
-    if (status == 0) status = device_create_file(sysfs_device, &dev_attr_frequency); 
+    if (status == 0)
+        status = device_create_file(sysfs_device, &dev_attr_config);
+    if (status == 0)
+        status = device_create_file(sysfs_device, &dev_attr_frequency);
 #endif
+
+    ret = init_gpio();
+    if(ret<0)
+    {
+        return ret;
+    }
 
     return 0;
 }
@@ -131,6 +148,8 @@ static void __exit skeleton_exit(void) {
     device_destroy(sysfs_class, 0);
     class_destroy(sysfs_class);
 #endif
+
+    deinit_gpio();
 }
 
 module_init(skeleton_init);
