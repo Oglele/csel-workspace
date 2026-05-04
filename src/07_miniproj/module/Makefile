@@ -7,13 +7,13 @@ export PATH := /buildroot/output/host/usr/sbin$\
 # Part executed when called from kernel build system:
 ifneq ($(KERNELRELEASE),)
 obj-m += mymodule.o		## name of the generated module
-
 mymodule-objs := module.o	## list of objects needed for that module
 CFLAGS_module.o := -DDEBUG
 
 # Part executed when called from standard make in module source directory:
 else
 include ../../kernel_settings
+
 PWD := $(shell pwd)
 
 all:
