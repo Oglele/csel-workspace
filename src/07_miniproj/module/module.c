@@ -23,6 +23,8 @@ static struct module_config config;
 struct thermal_zone_device* thermal_zone;
 static struct task_struct* my_thread;
 
+static const char module_name[] = "my_module";
+
 static int temp;
 static int frequency;
 
@@ -40,9 +42,10 @@ ssize_t frequency_store(struct device* dev,
 {
     sscanf(buf,
            "%i",
-           frequency);
+           &frequency);
     return count;
 }
+// DEVICE_ATTR(frequency, 222, 0, frequency_store);
 DEVICE_ATTR_WO(frequency);
 
 
@@ -106,9 +109,9 @@ static int __init skeleton_init(void) {
 
     int status = 0;
 #ifdef CLASS
-    sysfs_class = class_create(THIS_MODULE, "my_module_sysfs_class");
+    sysfs_class = class_create(THIS_MODULE, module_name);
     sysfs_device =
-        device_create(sysfs_class, NULL, 0, NULL, "my_module_sysfs_class");
+        device_create(sysfs_class, NULL, 0, NULL, module_name);
     if (status == 0) status = device_create_file(sysfs_device, &dev_attr_temp);
     if (status == 0) status = device_create_file(sysfs_device, &dev_attr_config); 
     if (status == 0) status = device_create_file(sysfs_device, &dev_attr_frequency); 
