@@ -24,18 +24,48 @@ struct thermal_zone_device* thermal_zone;
 static struct task_struct* my_thread;
 
 static int temp;
+static int frequency;
 
-ssize_t sysfs_show_val(struct device* dev, struct device_attribute* attr,
+ssize_t temp_show(struct device* dev, struct device_attribute* attr,
                        char* buf) {
     sprintf(buf, "%d\n", temp);
     return strlen(buf);
 }
-ssize_t sysfs_store_val(struct device* dev, struct device_attribute* attr,
-                        const char* buf, size_t count) {
-    temp = simple_strtol(buf, 0, 10);
+DEVICE_ATTR_RO(temp);
+
+ssize_t frequency_store(struct device* dev,
+                        struct device_attribute* attr,
+                        const char* buf,
+                        size_t count)
+{
+    sscanf(buf,
+           "%i",
+           frequency);
     return count;
 }
-DEVICE_ATTR(temp, 0664, sysfs_show_val, sysfs_store_val);
+DEVICE_ATTR_WO(frequency);
+
+
+ssize_t config_show(struct device* dev,
+                       struct device_attribute* attr,
+                       char* buf)
+{
+    sprintf(buf,
+            "%s\n",
+            config.mode);
+    return strlen(buf);
+}
+ssize_t config_store(struct device* dev,
+                        struct device_attribute* attr,
+                        const char* buf,
+                        size_t count)
+{
+    sscanf(buf,
+           "%s",
+           &config.mode);
+    return count;
+}
+DEVICE_ATTR(config, 0664, config_show, config_store);
 
 #ifdef CLASS
 static struct class* sysfs_class;
@@ -80,6 +110,8 @@ static int __init skeleton_init(void) {
     sysfs_device =
         device_create(sysfs_class, NULL, 0, NULL, "my_module_sysfs_class");
     if (status == 0) status = device_create_file(sysfs_device, &dev_attr_temp);
+    if (status == 0) status = device_create_file(sysfs_device, &dev_attr_config); 
+    if (status == 0) status = device_create_file(sysfs_device, &dev_attr_frequency); 
 #endif
 
     return 0;
@@ -91,6 +123,8 @@ static void __exit skeleton_exit(void) {
 
 #ifdef CLASS
     device_remove_file(sysfs_device, &dev_attr_temp);
+    device_remove_file(sysfs_device, &dev_attr_config);
+    device_remove_file(sysfs_device, &dev_attr_frequency);
     device_destroy(sysfs_class, 0);
     class_destroy(sysfs_class);
 #endif
