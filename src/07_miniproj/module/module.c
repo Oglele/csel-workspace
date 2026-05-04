@@ -14,20 +14,57 @@
 #include <linux/string.h>      /* needed for string handling */
 #include <linux/thermal.h>
 #include <linux/timer.h>
+#include <linux/minmax.h>
 
 #define CLASS
 
 #define GPIO_LED_FREQ 10
 
+#define FREQ_MAX 20
+#define FREQ_MIN 1
+
+enum modes{
+    MODE_AUTO,
+    MODE_MANUAL
+};
+
 struct module_config {
-    char mode[30];
+    enum modes mode;
+    int frequency;
+    int duty;
+};
+
+static const char *const str_mode_option[] = {
+    "auto", "manual", NULL
+};
+
+struct temp_freq_step{
+    int temp_threshold;
     int frequency;
 };
 
-static struct module_config config;
+static const struct temp_freq_step lut_thermal[] = {
+    {45000, 20},
+    {40000, 10},
+    {35000, 5},
+    {0, 2}
+};
+static int lut_size = ARRAY_SIZE(lut_thermal);
+
+
+
+static struct module_config config = {
+    .mode = MODE_AUTO,
+    .frequency = 5,
+    .duty = 50
+};
+
 struct thermal_zone_device* thermal_zone;
 static struct task_struct* my_thread;
 static struct timer_list my_timer;
+
+static struct class* sysfs_class;
+static struct device* sysfs_device;
 
 static const char module_name[] = "my_module";
 
@@ -42,26 +79,36 @@ DEVICE_ATTR_RO(temp);
 
 ssize_t config_show(struct device* dev, struct device_attribute* attr,
                     char* buf) {
-    sprintf(buf, "%s %d\n", config.mode,config.frequency);
+    sprintf(buf, "%s %d %d\n", str_mode_option[config.mode],config.frequency,config.duty);
     return strlen(buf);
 }
 ssize_t config_store(struct device* dev, struct device_attribute* attr,
                      const char* buf, size_t count) {
-    sscanf(buf, "%s %d", &config.mode, config.frequency);
+    struct module_config tmp;
+    int ret;
+    char tmp_buf[10];
+    ret = sscanf(buf, "%9s %d %d", tmp_buf, &tmp.frequency, &tmp.duty);
+    if (ret != 3) {
+        return -EINVAL;
+    }
+    int idx = sysfs_match_string(str_mode_option, tmp_buf);
+    if (idx < 0){
+        pr_err("Mode invalide : 'auto' ou 'manual' uniquement\n");
+        return -EINVAL;
+    }
+    config.mode = (enum modes)idx;
+    config.frequency = clamp_t(int,tmp.frequency,FREQ_MIN,FREQ_MAX);
+    config.duty = clamp_t(int,tmp.duty,0,100);
     return count;
 }
 DEVICE_ATTR(config, 0664, config_show, config_store);
 
-static struct class* sysfs_class;
-static struct device* sysfs_device;
 
 int get_temp(void) {
-    static bool led = 0;
     int t = 0;
     int ret = thermal_zone_get_temp(thermal_zone, &t);
     if (ret == 0) {
         pr_info("Température CPU : %d.%d °C\n", t / 1000, t % 1000);
-        gpio_set_value(GPIO_LED_FREQ, led = !led);
     } else {
         pr_info("Error while getting temp...\n");
         return -1;
@@ -74,13 +121,42 @@ static int temp_thread(void* data) {
     while (!kthread_should_stop()) {
         ssleep(5);
         temp = get_temp();
+        if (config.mode == MODE_AUTO)
+        {
+            int tmp_freq;
+            int i;
+            for (i = 0; i < lut_size; i++)
+            {
+                tmp_freq = lut_thermal[i].frequency;
+                if(temp >= lut_thermal[i].temp_threshold)
+                {
+                    break;
+                }
+            }
+            config.frequency = tmp_freq;
+        }
+        
     }
     return 0;
 }
 
 static void my_timer_callback(struct timer_list* timer) {
-    pr_info("Timer callback called (%ld)\n", jiffies);
-    mod_timer(&my_timer, jiffies + msecs_to_jiffies(2000));
+    static bool led = false;
+    // pr_info("timer callback led\n");
+    int p = 1000 / config.frequency;
+    int p1 = p * config.duty / 100;
+    int p2 = p - p1; 
+    if(led)
+    {
+        gpio_set_value(GPIO_LED_FREQ, 0);
+        mod_timer(&my_timer, jiffies + msecs_to_jiffies(p1));
+    }
+    else{
+        gpio_set_value(GPIO_LED_FREQ, 1);
+        mod_timer(&my_timer, jiffies + msecs_to_jiffies(p2));
+    }
+    led = !led;
+    
 }
 
 void deinit_gpio(void) { gpio_free(GPIO_LED_FREQ); }
@@ -89,13 +165,13 @@ static int __init skeleton_init(void) {
     int ret = 0;
     pr_info("Linux module CPU temp loaded\n");
 
+    // --------------  THERMAL CPU 
     thermal_zone = thermal_zone_get_zone_by_name("cpu-thermal");
     if (!thermal_zone) {
         pr_err("Failed to get thermal zone 0\n");
         return -ENODEV;
     }
 
-    my_thread = kthread_run(temp_thread, 0, "s/thread");
 
     // --------------  SYSFS 
     int status = 0;
@@ -123,6 +199,8 @@ static int __init skeleton_init(void) {
     timer_setup(&my_timer, my_timer_callback, 0);
     mod_timer(&my_timer, jiffies + msecs_to_jiffies(2000));
 
+    my_thread = kthread_run(temp_thread, 0, "s/thread");
+
     return 0;
 }
 
@@ -137,7 +215,7 @@ static void __exit skeleton_exit(void) {
 
     deinit_gpio();
 
-    del_timer(&my_timer);
+    del_timer_sync(&my_timer);
 }
 
 module_init(skeleton_init);
