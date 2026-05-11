@@ -24,17 +24,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/epoll.h>
-#include <sys/un.h>
-
 
 #include "ssd1306.h"
 
@@ -53,14 +52,97 @@
 #define BTN_A2 "2"
 #define BTN_A3 "3"
 
-#define MAX_EVENTS 3
+#define MAX_EVENTS 4
 
-int create_unix_socket(const char *path) {
+typedef void (*event_handler_t)(int fd, void* user_data);
+
+typedef struct {
+    int fd;
+    int fd_epoll;
+    uint32_t events_mask;
+    event_handler_t handler;
+    char name[32];
+} EventContext;
+
+static void handle_button(int fd, EventContext* ctx);
+static void handle_socket_client(int fd, EventContext* ctx);
+static void handle_socket_server(int fd, EventContext* ctx);
+static void register_event(int epoll_fd, EventContext* ctx, int fd);
+int create_unix_socket(const char* path);
+static int open_led();
+static int open_bnt(char* num_port);
+
+
+static EventContext ctx_btns[] = {
+    {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI, .handler = handle_button, .name = "btnA0"},
+    {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI, .handler = handle_button, .name = "btnA2"},
+    {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI, .handler = handle_button, .name = "btnA3"}
+};
+
+static EventContext ctx_socket_cli = {.events_mask = EPOLLIN | EPOLLET,
+                                      .handler = handle_socket_client,
+                                      .name = "socket_client"};
+
+static EventContext ctx_socket_srv = {.events_mask = EPOLLIN,
+                                      .handler = handle_socket_server,
+                                      .name = "Socket Serveur"};
+
+void handle_button(int fd, EventContext* ctx) {
+    // EventContext* ctx = (EventContext*)user_data;
+    syslog(LOG_INFO, "Name: %s on fd=%d ctx-fd%d\n", ctx->name, fd, ctx->fd);
+}
+
+void handle_socket_client(int fd, EventContext* ctx) {
+    // EventContext* ctx = (EventContext*)user_data;
+
+    char msg[128];
+    int bytes = read(fd, msg, sizeof(msg) - 1);
+    if (bytes <= 0) {
+        // Le client s'est déconnecté
+        epoll_ctl(ctx->fd_epoll, EPOLL_CTL_DEL, fd, NULL);
+        syslog(LOG_INFO, "socket client disconnect fd %d\n", fd);
+        close(fd);
+    } else {
+        msg[bytes] = '\0';  // Fin de chaîne
+        syslog(LOG_INFO, "socket receive fd %d: %s", fd, msg);
+    }
+}
+
+void handle_socket_server(int fd, EventContext* ctx) {
+    // EventContext* ctx = (EventContext*)user_data;
+    struct epoll_event ev;
+
+    int fd_cli = accept(fd, NULL, NULL);
+
+    register_event(ctx->fd_epoll, &ctx_socket_cli, fd_cli);
+
+    syslog(LOG_INFO, "Socket accept client fd %d", fd_cli);
+}
+
+void register_event(int epoll_fd, EventContext* ctx, int fd) {
+    struct epoll_event ev;
+
+    ctx->fd = fd;
+    ctx->fd_epoll = epoll_fd;
+    ev.events = ctx->events_mask;
+    ev.data.ptr = ctx;
+
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+        syslog(LOG_ERR, "Failed config epoll: %s", ctx->name);
+        exit(EXIT_FAILURE);
+    }
+    syslog(LOG_INFO, "epoll register: fd %d\n", fd);
+}
+
+int create_unix_socket(const char* path) {
     int fd;
     struct sockaddr_un addr;
 
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) err(EXIT_FAILURE, "failed creat socket");
+    if (fd < 0) {
+        syslog(LOG_ERR, "Failed creat socket");
+        exit(EXIT_FAILURE);
+    }
 
     unlink(path);
 
@@ -68,11 +150,11 @@ int create_unix_socket(const char *path) {
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(fd);
-        err(EXIT_FAILURE, "failed bind socket");
+        syslog(LOG_ERR, "Failed bind socket");
+        exit(EXIT_FAILURE);
     }
-
 
     listen(fd, 1);
     return fd;
@@ -144,100 +226,47 @@ void demon(void) {
     ssd1306_puts("--------------");
 
     int fd_led = open_led();
+    syslog(LOG_INFO, "LED open: fd %d\n", fd_led);
     int fd_btnA0 = open_bnt(BTN_A0);
+    syslog(LOG_INFO, "BTN open: fd %d\n", fd_btnA0);
     int fd_btnA2 = open_bnt(BTN_A2);
+    syslog(LOG_INFO, "BTN open: fd %d\n", fd_btnA2);
     int fd_btnA3 = open_bnt(BTN_A3);
-
-
-    int fd_ep = epoll_create1(0);
-    if (fd_ep == -1)
-        err(EXIT_FAILURE, "Failed creat epoll");
-
-    struct epoll_event ev, events[MAX_EVENTS];
-
-    ev.events = EPOLLIN | EPOLLPRI | EPOLLET;
-    ev.data.fd = fd_btnA0;
-
-    ret = epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_btnA0, &ev);
-    if (ret == -1)
-        err(EXIT_FAILURE, "Failed config epoll");
-
-    ev.events = EPOLLIN | EPOLLPRI | EPOLLET;
-    ev.data.fd = fd_btnA2;
-
-    ret = epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_btnA2, &ev);
-    if (ret == -1)
-        err(EXIT_FAILURE, "Failed config epoll");
-
-    ev.events = EPOLLIN | EPOLLPRI | EPOLLET;
-    ev.data.fd = fd_btnA3;
-
-    ret = epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_btnA3, &ev);
-    if (ret == -1)
-        err(EXIT_FAILURE, "Failed config epoll");
-
-
+    syslog(LOG_INFO, "BTN open: fd %d\n", fd_btnA3);
 
     int fd_server = create_unix_socket(SOCKET_PATH);
-    ev.events = EPOLLIN;
-    ev.data.fd = fd_server;
 
-    ret = epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_server, &ev);
-    if (ret == -1)
-        err(EXIT_FAILURE, "Failed config epoll fd_server");
+    int fd_ep = epoll_create1(0);
+    if (fd_ep == -1) {
+        syslog(LOG_ERR, "Failed creat epoll");
+        exit(EXIT_FAILURE);
+    }
 
+    struct epoll_event events[MAX_EVENTS];
+
+    register_event(fd_ep, &ctx_btns[0], fd_btnA0);
+    register_event(fd_ep, &ctx_btns[1], fd_btnA2);
+    register_event(fd_ep, &ctx_btns[2], fd_btnA3);
+    register_event(fd_ep, &ctx_socket_srv, fd_server);
 
     while (1) {
         int n = epoll_wait(fd_ep, events, MAX_EVENTS, -1);
-        if (n == -1){
+        if (n == -1) {
             if (errno == EINTR) continue;
-            err(EXIT_FAILURE, "Failed receive events");
+            syslog(LOG_ERR, "Failed receive events");
+            exit(EXIT_FAILURE);
         }
 
-        for (int i = 0; i < n; i++)
-        {
-            int current_fd = events[i].data.fd;
-
-            if (current_fd == fd_server) {
-                int fd_cli = accept(fd_server, NULL, NULL);
-                ev.events = EPOLLIN | EPOLLET; 
-                ev.data.fd = fd_cli;
-                epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_cli, &ev);
-            }
-
-            else if(current_fd == fd_btnA0 || current_fd == fd_btnA2 || current_fd == fd_btnA3)
-            {
-                syslog(LOG_INFO, "Button event=%ld on fd=%d\n", events[i].events, events[i].data.fd);
-            }
-            else{
-                char msg[128];
-                int bytes = read(current_fd, msg, sizeof(msg) - 1);
-                if (bytes <= 0) {
-                // Le client s'est déconnecté
-                epoll_ctl(fd_ep, EPOLL_CTL_DEL, current_fd, NULL);
-                close(current_fd);
-                }
-                else{
-                    msg[bytes] = '\0'; // Fin de chaîne
-                    syslog(LOG_INFO, "Commande reçue : %s", msg);
-                }
-            }
-            
-            
-
+        for (int i = 0; i < n; i++) {
+            EventContext* ctx = (EventContext*)events[i].data.ptr;
+            ctx->handler(ctx->fd, ctx);
         }
-        
     }
 }
 
-
-
 int main(int argc, char* argv[]) {
-    int fd[2];
-    int ret = socketpair(AF_UNIX, SOCK_STREAM, 0, fd);
-    if (ret == -1) {
-        err(EXIT_FAILURE, "Failed creat Socket");
-    }
+
+    int ret;
 
     // 1. Créer un nouveau processus et terminer le processus parent
     pid_t pid = fork();
