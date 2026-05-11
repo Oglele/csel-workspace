@@ -33,6 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <sys/un.h>
 
 
 #include "ssd1306.h"
@@ -45,12 +46,37 @@
 #define GPIO_BTN_A2 "/sys/class/gpio/gpio2"
 #define GPIO_BTN_A3 "/sys/class/gpio/gpio3"
 
+#define SOCKET_PATH "/tmp/demon.sock"
+
 #define LED "362"
 #define BTN_A0 "0"
 #define BTN_A2 "2"
 #define BTN_A3 "3"
 
 #define MAX_EVENTS 3
+
+int create_unix_socket(const char *path) {
+    int fd;
+    struct sockaddr_un addr;
+
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) err(EXIT_FAILURE, "failed creat socket");
+
+    unlink(path);
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        err(EXIT_FAILURE, "failed bind socket");
+    }
+
+
+    listen(fd, 1);
+    return fd;
+}
 
 static int open_led() {
     // unexport pin out of sysfs (reinitialization)
@@ -151,6 +177,16 @@ void demon(void) {
         err(EXIT_FAILURE, "Failed config epoll");
 
 
+
+    int fd_server = create_unix_socket(SOCKET_PATH);
+    ev.events = EPOLLIN;
+    ev.data.fd = fd_server;
+
+    ret = epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_server, &ev);
+    if (ret == -1)
+        err(EXIT_FAILURE, "Failed config epoll fd_server");
+
+
     while (1) {
         int n = epoll_wait(fd_ep, events, MAX_EVENTS, -1);
         if (n == -1){
@@ -160,9 +196,34 @@ void demon(void) {
 
         for (int i = 0; i < n; i++)
         {
-            char buf[2];
             int current_fd = events[i].data.fd;
-            syslog(LOG_INFO, "event=%ld on fd=%d\n", events[i].events, events[i].data.fd);
+
+            if (current_fd == fd_server) {
+                int fd_cli = accept(fd_server, NULL, NULL);
+                ev.events = EPOLLIN | EPOLLET; 
+                ev.data.fd = fd_cli;
+                epoll_ctl(fd_ep, EPOLL_CTL_ADD, fd_cli, &ev);
+            }
+
+            else if(current_fd == fd_btnA0 || current_fd == fd_btnA2 || current_fd == fd_btnA3)
+            {
+                syslog(LOG_INFO, "Button event=%ld on fd=%d\n", events[i].events, events[i].data.fd);
+            }
+            else{
+                char msg[128];
+                int bytes = read(current_fd, msg, sizeof(msg) - 1);
+                if (bytes <= 0) {
+                // Le client s'est déconnecté
+                epoll_ctl(fd_ep, EPOLL_CTL_DEL, current_fd, NULL);
+                close(current_fd);
+                }
+                else{
+                    msg[bytes] = '\0'; // Fin de chaîne
+                    syslog(LOG_INFO, "Commande reçue : %s", msg);
+                }
+            }
+            
+            
 
         }
         
