@@ -8,6 +8,7 @@ TOOLCHAIN_PATH=/buildroot/output/host/usr/bin/
 TOOLCHAIN=$(TOOLCHAIN_PATH)aarch64-linux-
 CFLAGS=-Wall -Wextra -g -c -O0 -MD -std=gnu11
 CFLAGS+=-mcpu=cortex-a53 -funwind-tables
+CFLAGS+=-I../commun
 ##CFLAGS+=-O2 -fno-omit-frame-pointer
 OBJDIR=.obj/nano
 

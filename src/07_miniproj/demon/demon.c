@@ -35,6 +35,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "commun.h"
 #include "ssd1306.h"
 
 #define GPIO_EXPORT "/sys/class/gpio/export"
@@ -52,7 +53,11 @@
 #define BTN_A2 "2"
 #define BTN_A3 "3"
 
-#define MAX_EVENTS 4
+#define MAX_EVENTS 6
+
+static module_config_t config = {.mode = MODE_AUTO, .frequency = 5, .duty = 50};
+
+typedef enum { BTN_UP, BTN_DOWN, BTN_MODE } btn_id_t;
 
 typedef void (*event_handler_t)(int fd, void* user_data);
 
@@ -62,22 +67,32 @@ typedef struct {
     uint32_t events_mask;
     event_handler_t handler;
     char name[32];
+    btn_id_t btn_id;
 } EventContext;
 
 static void handle_button(int fd, EventContext* ctx);
 static void handle_socket_client(int fd, EventContext* ctx);
 static void handle_socket_server(int fd, EventContext* ctx);
+static void handle_timer(int fd, EventContext* ctx);
+
 static void register_event(int epoll_fd, EventContext* ctx, int fd);
 int create_unix_socket(const char* path);
 static int open_led();
 static int open_bnt(char* num_port);
+static void sysfs_write_conf(const char* path, module_config_t conf);
 
-
-static EventContext ctx_btns[] = {
-    {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI, .handler = handle_button, .name = "btnA0"},
-    {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI, .handler = handle_button, .name = "btnA2"},
-    {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI, .handler = handle_button, .name = "btnA3"}
-};
+static EventContext ctx_btns[] = {{.events_mask = EPOLLIN | EPOLLET | EPOLLPRI,
+                                   .handler = handle_button,
+                                   .name = "btnA0",
+                                   .btn_id = BTN_UP},
+                                  {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI,
+                                   .handler = handle_button,
+                                   .name = "btnA2",
+                                   .btn_id = BTN_DOWN},
+                                  {.events_mask = EPOLLIN | EPOLLET | EPOLLPRI,
+                                   .handler = handle_button,
+                                   .name = "btnA3",
+                                   .btn_id = BTN_MODE}};
 
 static EventContext ctx_socket_cli = {.events_mask = EPOLLIN | EPOLLET,
                                       .handler = handle_socket_client,
@@ -87,9 +102,54 @@ static EventContext ctx_socket_srv = {.events_mask = EPOLLIN,
                                       .handler = handle_socket_server,
                                       .name = "Socket Serveur"};
 
+static EventContext ctx_timer = {
+    .events_mask = EPOLLIN, .handler = handle_timer, .name = "timer"};
+
+void handle_timer(int fd, EventContext* ctx) {
+    uint64_t expirations;
+    if (read(fd, &expirations, sizeof(expirations)) > 0) {
+        syslog(LOG_INFO, "Timer expiré : mise à jour OLED");
+        // update_display(); // Optionnel
+    }
+}
+
 void handle_button(int fd, EventContext* ctx) {
-    // EventContext* ctx = (EventContext*)user_data;
-    syslog(LOG_INFO, "Name: %s on fd=%d ctx-fd%d\n", ctx->name, fd, ctx->fd);
+    char dummy[2];
+    lseek(fd, 0, SEEK_SET);
+    read(fd, &dummy, 1);
+    switch (ctx->btn_id) {
+        case BTN_UP:
+            syslog(LOG_INFO, "Name: %s UP on fd=%d ctx-fd%d\n", ctx->name, fd,
+                   ctx->fd);
+            if (config.mode == MODE_MANUAL) {
+                config.frequency =
+                    clamp(config.frequency + 1, FREQ_MIN, FREQ_MAX);
+                sysfs_write_conf(module_conf_path, config);
+            }
+
+            break;
+
+        case BTN_DOWN:
+            if (config.mode == MODE_MANUAL) {
+                config.frequency =
+                    clamp(config.frequency - 1, FREQ_MIN, FREQ_MAX);
+                sysfs_write_conf(module_conf_path, config);
+            }
+            syslog(LOG_INFO, "Name: %s DOWN on fd=%d ctx-fd%d\n", ctx->name, fd,
+                   ctx->fd);
+            break;
+
+        case BTN_MODE:
+
+            config.mode = (config.mode == MODE_AUTO) ? MODE_MANUAL : MODE_AUTO;
+            syslog(LOG_INFO, "Name: %s MODE on fd=%d ctx-fd%d\n", ctx->name, fd,
+                   ctx->fd);
+            sysfs_write_conf(module_conf_path, config);
+            break;
+
+        default:
+            return;  // On sort si l'ID est inconnu
+    }
 }
 
 void handle_socket_client(int fd, EventContext* ctx) {
@@ -212,10 +272,37 @@ static int open_bnt(char* num_port) {
     return f;
 }
 
+static void sysfs_write_conf(const char* path, module_config_t conf) {
+    char tmp_buf[25];
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        syslog(LOG_ERR, "Impossible d'ouvrir %s : %m", path);
+        return;
+    }
+    int len = snprintf(tmp_buf, sizeof(tmp_buf), "%s %d %d\n",
+                       str_mode_option[conf.mode], conf.frequency, conf.duty);
+
+    if (len < 0 || len >= sizeof(tmp_buf)) {
+        syslog(LOG_ERR,
+               "Erreur : Données de configuration trop longues pour le buffer");
+        close(fd);  // Toujours fermer avant de partir
+        return;
+    }
+
+    if (write(fd, tmp_buf, len) < 0) {
+        syslog(LOG_ERR, "Erreur d'écriture dans %s : %m", path);
+    } else {
+        syslog(LOG_INFO, "Write config: %s in \n%s", tmp_buf, path);
+    }
+
+    close(fd);
+}
+
 void catch_signal(int signo) { printf("Signal [%d] arrived: \n", signo); }
 
 void demon(void) {
     int ret;
+    struct itimerspec periode = {.it_interval = {5, 0}, .it_value = {5, 0}};
 
     ssd1306_init();
     ssd1306_set_position(0, 0);
@@ -236,6 +323,17 @@ void demon(void) {
 
     int fd_server = create_unix_socket(SOCKET_PATH);
 
+    int fd_timer = timerfd_create(CLOCK_MONOTONIC, 0);
+    if (fd_timer == -1) {
+        syslog(LOG_ERR, "Failed create timerfd_settime");
+        exit(EXIT_FAILURE);
+    }
+
+    if (timerfd_settime(fd_timer, 0, &periode, NULL) == -1) {
+        syslog(LOG_ERR, "Failed settime timerfd_settime");
+        exit(EXIT_FAILURE);
+    }
+
     int fd_ep = epoll_create1(0);
     if (fd_ep == -1) {
         syslog(LOG_ERR, "Failed creat epoll");
@@ -248,6 +346,7 @@ void demon(void) {
     register_event(fd_ep, &ctx_btns[1], fd_btnA2);
     register_event(fd_ep, &ctx_btns[2], fd_btnA3);
     register_event(fd_ep, &ctx_socket_srv, fd_server);
+    register_event(fd_ep, &ctx_timer, fd_timer);
 
     while (1) {
         int n = epoll_wait(fd_ep, events, MAX_EVENTS, -1);
@@ -265,7 +364,6 @@ void demon(void) {
 }
 
 int main(int argc, char* argv[]) {
-
     int ret;
 
     // 1. Créer un nouveau processus et terminer le processus parent
