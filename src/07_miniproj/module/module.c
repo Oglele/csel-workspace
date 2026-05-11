@@ -86,7 +86,7 @@ ssize_t config_store(struct device* dev, struct device_attribute* attr,
                      const char* buf, size_t count) {
     struct module_config tmp;
     int ret;
-    char tmp_buf[10];
+    char tmp_buf[25];
     ret = sscanf(buf, "%9s %d %d", tmp_buf, &tmp.frequency, &tmp.duty);
     if (ret != 3) {
         return -EINVAL;
@@ -108,7 +108,7 @@ int get_temp(void) {
     int t = 0;
     int ret = thermal_zone_get_temp(thermal_zone, &t);
     if (ret == 0) {
-        pr_info("Température CPU : %d.%d °C\n", t / 1000, t % 1000);
+        // pr_info("Température CPU : %d.%d °C\n", t / 1000, t % 1000);
     } else {
         pr_info("Error while getting temp...\n");
         return -1;
