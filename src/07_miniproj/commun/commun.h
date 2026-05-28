@@ -6,6 +6,7 @@
 
 static const char module_name[] = "my_module";
 static const char module_conf_path[] = "/sys/class/my_module/my_module/config";
+static const char module_temp_path[] = "/sys/class/my_module/my_module/temp";
 
 typedef enum {
     MODE_AUTO,

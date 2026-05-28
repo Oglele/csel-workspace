@@ -156,7 +156,6 @@ static void my_timer_callback(struct timer_list* timer) {
         mod_timer(&my_timer, jiffies + msecs_to_jiffies(p2));
     }
     led = !led;
-    
 }
 
 void deinit_gpio(void) { gpio_free(GPIO_LED_FREQ); }
@@ -178,8 +177,7 @@ static int __init skeleton_init(void) {
     sysfs_class = class_create(THIS_MODULE, module_name);
     sysfs_device = device_create(sysfs_class, NULL, 0, NULL, module_name);
     if (status == 0) status = device_create_file(sysfs_device, &dev_attr_temp);
-    if (status == 0)
-        status = device_create_file(sysfs_device, &dev_attr_config);
+    if (status == 0) status = device_create_file(sysfs_device, &dev_attr_config);
 
 
     // --------------  GPIO

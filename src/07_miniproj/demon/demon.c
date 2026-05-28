@@ -80,6 +80,7 @@ int create_unix_socket(const char* path);
 static int open_led();
 static int open_bnt(char* num_port);
 static void sysfs_write_conf(const char* path, module_config_t conf);
+static void sysfs_read_temp(const char* path, int * temp);
 
 static EventContext ctx_btns[] = {{.events_mask = EPOLLIN | EPOLLET | EPOLLPRI,
                                    .handler = handle_button,
@@ -105,11 +106,43 @@ static EventContext ctx_socket_srv = {.events_mask = EPOLLIN,
 static EventContext ctx_timer = {
     .events_mask = EPOLLIN, .handler = handle_timer, .name = "timer"};
 
+
+void update_display(){
+
+    int temp;
+    sysfs_read_temp(module_temp_path,&temp);
+
+    char tmp_buf[16];
+    int len = snprintf(tmp_buf, sizeof(tmp_buf), "%s %d %d  ",
+                       str_mode_option[config.mode], config.frequency, config.duty);
+
+    if (len < 0 || len >= sizeof(tmp_buf)) {
+        syslog(LOG_ERR,
+               "Erreur : Données de configuration trop longues pour le buffer");
+        return;
+    }
+
+    ssd1306_set_position(1, 3);
+    ssd1306_puts(tmp_buf);
+
+    len = snprintf(tmp_buf, sizeof(tmp_buf), "tmp: %d,%02d C",temp/1000,temp%1000);
+
+    if (len < 0 || len >= sizeof(tmp_buf)) {
+        syslog(LOG_ERR,
+               "Erreur : Données de configuration trop longues pour le buffer");
+        return;
+    }
+
+    ssd1306_set_position(1, 4);
+    ssd1306_puts(tmp_buf);
+
+}
+
 void handle_timer(int fd, EventContext* ctx) {
     uint64_t expirations;
     if (read(fd, &expirations, sizeof(expirations)) > 0) {
         syslog(LOG_INFO, "Timer expiré : mise à jour OLED");
-        // update_display(); // Optionnel
+        update_display();
     }
 }
 
@@ -150,6 +183,16 @@ void handle_button(int fd, EventContext* ctx) {
         default:
             return;  // On sort si l'ID est inconnu
     }
+    update_display();
+}
+
+int match_string(const char *const *array, const char *string) {
+    for (int i = 0; array[i] != NULL; i++) {
+        if (strcmp(array[i], string) == 0) {
+            return i; // Retourne l'index (0 pour auto, 1 pour manual)
+        }
+    }
+    return -1; // Non trouvé
 }
 
 void handle_socket_client(int fd, EventContext* ctx) {
@@ -166,6 +209,18 @@ void handle_socket_client(int fd, EventContext* ctx) {
         msg[bytes] = '\0';  // Fin de chaîne
         syslog(LOG_INFO, "socket receive fd %d: %s", fd, msg);
     }
+
+    char tmp_buf[25];
+    int ret = sscanf(msg, "%9s %d %d", tmp_buf, &config.frequency, &config.duty);
+    if (ret != 3) {
+        return -EINVAL;
+    }
+    int idx = match_string(str_mode_option, tmp_buf);
+    if (idx < 0){
+        syslog(LOG_INFO, "Mode invalide : 'auto' ou 'manual' uniquement\n");
+        return -EINVAL;
+    }
+    config.mode = (module_mode_t)idx;
 }
 
 void handle_socket_server(int fd, EventContext* ctx) {
@@ -270,6 +325,37 @@ static int open_bnt(char* num_port) {
     snprintf(path, sizeof(path), "/sys/class/gpio/gpio%s/value", num_port);
     f = open(path, O_RDWR);
     return f;
+}
+
+static void sysfs_read_temp(const char* path, int * temp)
+{
+    char tmp_buf[25];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        syslog(LOG_ERR, "Impossible d'ouvrir %s : %m", path);
+        return;
+    }
+
+    ssize_t nr = read(fd, tmp_buf, sizeof(tmp_buf) - 1);
+    close(fd);
+
+    if (nr < 0) {
+        syslog(LOG_ERR, "Erreur de lecture sur %s : %m", path);
+        return;
+    }
+
+    tmp_buf[nr] = '\0';
+
+    int ret = sscanf(tmp_buf,"%d",temp);
+    if (ret != 1)
+    {
+        syslog(LOG_ERR, "Impossible de parser la température depuis %s", path);
+        return ;
+    }
+
+    syslog(LOG_INFO, "Température lue avec succès : %d", *temp);
+    
+
 }
 
 static void sysfs_write_conf(const char* path, module_config_t conf) {

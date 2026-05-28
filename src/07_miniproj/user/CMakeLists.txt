@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.28)
 project(ex7-app)
 
 include(../../nanopi.cmake)
-add_executable(user user.c)
+add_executable(user user.c ../commun/commun.h)
+
+target_include_directories(user PRIVATE ../commun)
 
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)

@@ -7,12 +7,56 @@
 #include <errno.h>
 #include <err.h>
 
+#include "commun.h"
+
 #define SOCKET_PATH "/tmp/demon.sock"
+
+
+
+
+int match_string(const char *const *array, const char *string) {
+    for (int i = 0; array[i] != NULL; i++) {
+        if (strcmp(array[i], string) == 0) {
+            return i;
+        }
+    }
+    return -EINVAL;
+}
 
 int main(int argc, char *argv[]) {
     int sockfd;
     struct sockaddr_un addr;
-    char *message = (argc > 1) ? argv[1] : "Hello Demon!";
+    char message[25], tmp_buf[10];
+    module_config_t conf_tmp;
+
+    if (argc < 4)
+    {
+        printf("User app - Usage\n"
+               "user <mode> <frequency> <dutyCycle>\n"
+               "    mode:       manual / auto\n"
+               "    frequency:  min 1, max 20\n"
+               "    duty:       0-100\n\n");
+        exit(0);
+    }
+
+    strncpy(tmp_buf, argv[1], sizeof(tmp_buf) - 1);
+    tmp_buf[sizeof(tmp_buf) - 1] = '\0';
+    conf_tmp.frequency = atoi(argv[2]);
+    conf_tmp.duty = atoi(argv[3]);
+
+
+    int idx = match_string(str_mode_option, tmp_buf);
+    if (idx < 0) {
+        fprintf(stderr, "Mode invalide : 'auto' ou 'manual' uniquement\n");
+        return -EINVAL;
+    }
+
+    conf_tmp.frequency = clamp(conf_tmp.frequency, FREQ_MIN, FREQ_MAX);
+    conf_tmp.duty = clamp(conf_tmp.duty, 0, 100);
+
+    snprintf(message, sizeof(message), "%s %d %d", tmp_buf, conf_tmp.frequency, conf_tmp.duty);
+
+    printf("msg send = %s %d %d\n",tmp_buf, conf_tmp.frequency, conf_tmp.duty);
 
     sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sockfd < 0) {
